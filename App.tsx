@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Heart, Stars, Baby, Calendar, MessageCircle, ArrowRight, Share2, ShieldCheck, CheckCircle2, X, ExternalLink } from 'lucide-react';
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenerativeAI } from "@google/genai";
 import { SUBSCRIPTION_TIERS, INITIAL_MESSAGES } from './constants';
 import { TierLevel, Message, SubscriptionTier } from './types';
 
@@ -9,7 +9,7 @@ const App: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES);
   const [newMessage, setNewMessage] = useState('');
   const [authorName, setAuthorName] = useState('');
-  const [babyDiary, setBabyDiary] = useState<string>('正在感受媽媽的心跳，準備跟世界見面中...');
+  const [babyDiary, setBabyDiary] = useState<string>('嗨～我是滿寶！正在感受媽媽的心跳，準備跟世界見面中...');
   const [isGenerating, setIsGenerating] = useState(false);
   const [selectedTier, setSelectedTier] = useState<SubscriptionTier | null>(null);
 
@@ -32,31 +32,41 @@ const App: React.FC = () => {
     }
   };
 
-  // AI 產生寶貝獨白
+  // 產生寶貝獨白 (使用 Gemini AI)
   const generateBabyThoughts = async () => {
     setIsGenerating(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || "" });
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: "你是一個還在肚子裡的胎兒，大約12週大。請用可愛、溫暖且幽默的口吻寫一段話給未來的乾爹乾媽們，字數約100字以內。一定要包含對乾爹乾媽的感謝。",
-        config: {
-          temperature: 0.8,
-          topP: 0.95,
-        }
-      });
-      setBabyDiary(response.text || '今天在裡面翻了一個筋斗，大家都要想我喔！');
+      // 使用 Vite 標準環境變數 VITE_GEMINI_API_KEY
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+      
+      if (!apiKey || apiKey === 'PLACEHOLDER_API_KEY') {
+        throw new Error('API Key is missing or invalid');
+      }
+
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
+
+      const prompt = "你是一個還在肚子裡的胎兒，小名叫做「滿寶」，大約12週大。請用可愛、溫暖且幽默的口吻寫一段話給未來的乾爹乾媽們，字數約100字以內。一定要包含對乾爹乾媽的感謝，並提到預產期是 2026/07/15。";
+
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text();
+      setBabyDiary(text);
     } catch (error) {
       console.error("Failed to generate baby thoughts", error);
+      // Fallback 靜態文字
+      const fallbacks = [
+        "嗨～我是滿寶！還在媽咪肚子裡努力長大哦！謝謝未來的乾爹乾媽們，2026/07/15 我們不見不散！💕",
+        "Hi！我是滿寶～現在每天最愛聽媽咪的心跳聲！好期待見到乾爹乾媽們，謝謝你們的支持！👶✨"
+      ];
+      setBabyDiary(fallbacks[Math.floor(Math.random() * fallbacks.length)]);
     } finally {
       setIsGenerating(false);
     }
   };
 
   useEffect(() => {
-    if (process.env.API_KEY) {
-      generateBabyThoughts();
-    }
+    generateBabyThoughts();
   }, []);
 
   const handleSendMessage = (e: React.FormEvent) => {
@@ -163,11 +173,11 @@ const App: React.FC = () => {
               </div>
               <h1 className="text-5xl md:text-6xl font-extrabold text-gray-900 leading-tight">
                 Hello World! <br />
-                我是還在探險的 <span className="text-pink-500">小寶貝</span>
+                我是還在探險的 <span className="text-pink-500">滿寶</span>
               </h1>
               <p className="text-lg text-gray-600 leading-relaxed">
-                我還在媽媽肚子裡努力成長，但我已經等不及想要見到各位乾爹乾媽了！
-                邀請你成為我人生旅途的第一批守護者。
+                我還在媽媽肚子裡努力成長，預計 2026/07/15 跟大家見面！
+                我已經等不及想要見到各位乾爹乾媽了！邀請你成為我人生旅途的第一批守護者。
               </p>
               <div className="flex gap-4">
                 <button 
@@ -189,7 +199,7 @@ const App: React.FC = () => {
               <div className="absolute -inset-4 bg-gradient-to-r from-pink-200 to-purple-200 rounded-[2rem] blur-2xl opacity-50 group-hover:opacity-70 transition duration-1000"></div>
               <div className="relative bg-white p-4 rounded-[2rem] shadow-2xl border border-pink-50 transform rotate-1 group-hover:rotate-0 transition duration-500">
                 <img 
-                  src="https://images.unsplash.com/photo-1559734840-f9509ee5677f?q=80&w=1000&auto=format&fit=crop" 
+                  src="./product_1.jpg" 
                   alt="Ultrasound"
                   className="rounded-xl w-full h-auto object-cover aspect-[4/3] grayscale contrast-125"
                 />
@@ -215,7 +225,7 @@ const App: React.FC = () => {
               <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white p-4 rounded-full shadow-lg">
                 <Baby className="text-pink-400" size={40} />
               </div>
-              <h2 className="text-2xl font-bold text-center mb-8 text-gray-800">寶貝今日的心情獨白</h2>
+              <h2 className="text-2xl font-bold text-center mb-8 text-gray-800">滿寶今日的心情獨白</h2>
               <div className="relative">
                 <blockquote className="text-xl md:text-2xl text-center text-gray-700 italic font-medium leading-relaxed">
                   “{babyDiary}”
@@ -227,7 +237,7 @@ const App: React.FC = () => {
                   disabled={isGenerating}
                   className="text-sm font-bold text-pink-500 hover:text-pink-600 transition flex items-center gap-2 disabled:opacity-50"
                 >
-                  {isGenerating ? '正在感應寶貝中...' : '再聽聽寶貝說什麼？'}
+                  {isGenerating ? '正在感應滿寶中...' : '再聽聽滿寶說什麼？'}
                 </button>
               </div>
             </div>
@@ -305,7 +315,7 @@ const App: React.FC = () => {
                       rows={4}
                       value={newMessage}
                       onChange={(e) => setNewMessage(e.target.value)}
-                      placeholder="寫下給小寶貝的祝福..."
+                      placeholder="寫下給滿寶的祝福..."
                       className="w-full px-4 py-3 bg-gray-50 rounded-xl border border-gray-100 focus:outline-none focus:ring-2 focus:ring-pink-400 resize-none"
                     ></textarea>
                   </div>
@@ -345,11 +355,11 @@ const App: React.FC = () => {
           <div>
             <div className="text-2xl font-extrabold mb-2">Little Blessing</div>
             <p className="text-gray-400 text-sm max-w-xs">
-              這是一個充滿愛的平台，讓我們一起陪伴小寶貝健康快樂地長大。
+              這是一個充滿愛的平台，讓我們一起陪伴滿寶健康快樂地長大。
             </p>
           </div>
           <div className="max-w-6xl mx-auto mt-12 pt-8 border-t border-gray-800 text-center text-gray-500 text-xs w-full">
-            © {new Date().getFullYear()} Little Blessing. Made with Love for our future baby.
+            © {new Date().getFullYear()} Little Blessing. Made with Love for 滿寶 💕
           </div>
         </div>
       </footer>
