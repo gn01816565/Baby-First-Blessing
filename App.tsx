@@ -1,379 +1,353 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { Heart, Stars, Baby, Calendar, MessageCircle, ArrowRight, Share2, ShieldCheck, CheckCircle2, X, ExternalLink } from 'lucide-react';
+import { Heart, Stars, Baby, Calendar, MessageCircle, ArrowRight, CheckCircle2, ExternalLink, Sparkles, Send, Loader2, AlertCircle } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
-import { SUBSCRIPTION_TIERS, INITIAL_MESSAGES } from './constants';
-import { TierLevel, Message, SubscriptionTier } from './types';
+import { initializeApp, getApps, getApp, FirebaseApp } from "firebase/app";
+import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, serverTimestamp, Firestore } from "firebase/firestore";
+import { SUBSCRIPTION_TIERS } from './constants';
 
-// 設定預產期為 2026 年 7 月 15 日
+// Firebase 設定
+const firebaseConfig = {
+  apiKey: "AIzaSyCFN5m27Q2BCuHKlofjarX9POrxX3LSCEs",
+  authDomain: "baby-first-blessing.firebaseapp.com",
+  projectId: "baby-first-blessing",
+  storageBucket: "baby-first-blessing.firebasestorage.app",
+  messagingSenderId: "1061010685596",
+  appId: "1:1061010685596:web:a97d1c09127a6d24ffb759",
+  measurementId: "G-H3QM5SWP9E"
+};
+
+// 安全初始化 Firebase
+let firebaseApp: FirebaseApp | undefined;
+let db: Firestore | undefined;
+
+try {
+  // 檢查是否已經初始化，避免重複初始化錯誤
+  firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+  db = getFirestore(firebaseApp);
+} catch (error) {
+  console.error("Firebase Early Init Error:", error);
+}
+
 const DUE_DATE = '2026-07-15';
 
 const App: React.FC = () => {
-  const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES);
+  const [messages, setMessages] = useState<any[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const [authorName, setAuthorName] = useState('');
-  const [babyDiary, setBabyDiary] = useState<string>('正在感受媽媽的心跳，我是滿寶，準備跟世界見面中...');
+  const [babyDiary, setBabyDiary] = useState<string>('正在感受媽媽的心跳，我是滿寶，期待夏天見面...');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [imgError, setImgError] = useState(false);
+  const [isLoadingMessages, setIsLoadingMessages] = useState(true);
+  const [firestoreError, setFirestoreError] = useState<string | null>(null);
 
-  // 自動計算目前孕期
   const pregnancyStatus = useMemo(() => {
     const due = new Date(DUE_DATE);
     const today = new Date();
-    const totalPregnancyDays = 280; // 一般以 40 週 (280天) 為標準孕期
-    
-    // 計算距離預產期還有幾天
+    const totalDays = 280;
     const diffTime = due.getTime() - today.getTime();
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    const currentDays = totalDays - diffDays;
     
-    // 計算已經懷孕幾天
-    const currentDays = totalPregnancyDays - diffDays;
-    
-    if (currentDays < 0) {
-      return { weeks: 0, days: 0, started: false, label: "備孕與應援中" };
-    }
-    
+    if (currentDays < 0) return { label: "備孕中" };
     const weeks = Math.floor(currentDays / 7);
     const days = currentDays % 7;
-    
-    // 限制最高週數為 40
-    if (weeks >= 40) {
-      return { weeks: 40, days: 0, started: true, label: "準備出生囉！" };
-    }
-    
-    return { 
-      weeks, 
-      days, 
-      started: true, 
-      label: `${weeks} 週 ${days} 天`
-    };
+    return { label: `${weeks} 週 ${days} 天` };
   }, []);
 
-  // 平滑捲動至指定區塊
-  const scrollToSection = (id: string) => {
-    const element = document.getElementById(id);
-    if (element) {
-      element.scrollIntoView({ behavior: 'smooth' });
+  // 監聽 Firebase 留言
+  useEffect(() => {
+    if (!db) {
+      setFirestoreError("Firestore service is not available. Check configuration.");
+      setIsLoadingMessages(false);
+      return;
     }
-  };
 
-  // PayPal 直接訂閱網址對應
-  const getPaypalLink = (tierId: string) => {
-    const baseUrl = "https://www.paypal.com/billing/plans/subscribe?plan_id=";
-    switch (tierId) {
-      case 'tier-1': return `${baseUrl}P-51M44352TK751472SNFPBFPY`; // 500 NTD
-      case 'tier-2': return `${baseUrl}P-8VD31323VA233292BNFPBG6Q`; // 1500 NTD
-      case 'tier-3': return `${baseUrl}P-3RC26760JT829260YNFPBIBI`; // 3000 NTD
-      default: return "#";
+    let unsubscribe = () => {};
+    try {
+      const q = query(collection(db, "blessings"), orderBy("timestamp", "desc"));
+      unsubscribe = onSnapshot(q, (snapshot) => {
+        const msgs = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        setMessages(msgs);
+        setIsLoadingMessages(false);
+        setFirestoreError(null);
+      }, (error) => {
+        console.error("Firestore Snapshot Error:", error);
+        setFirestoreError(error.message);
+        setIsLoadingMessages(false);
+      });
+    } catch (e: any) {
+      console.error("Firestore Hook Error:", e);
+      setFirestoreError(e.message);
+      setIsLoadingMessages(false);
     }
-  };
+    return () => unsubscribe();
+  }, []);
 
-  // AI 產生滿寶的動態獨白
   const generateBabyThoughts = async () => {
-    // 確保只在有 API Key 的情況下執行，API Key 透過環境變數 process.env.API_KEY 取得
     if (!process.env.API_KEY) return;
-    
     setIsGenerating(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const stageContext = pregnancyStatus.started 
-        ? `目前我已經在媽媽肚子裡 ${pregnancyStatus.weeks} 週了。`
-        : `我正在準備跟爸媽見面。`;
-
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `你是一個還在肚子裡的胎兒，小名叫「滿寶」。${stageContext} 請根據這個成長階段，用可愛、溫暖且充滿福氣的口吻寫一段話給未來的乾爹乾媽們，字數 80 字以內。一定要包含對乾爹乾媽支持的感謝，並提到「滿寶」這個名字。不要包含任何技術性的描述。`,
-        config: {
-          temperature: 0.85,
-          topP: 0.95,
-        }
+        contents: `你是一個還在肚子裡的胎兒，小名叫「滿寶」。目前進度是 ${pregnancyStatus.label}。請用可愛溫暖的口吻跟未來的乾爹乾媽說一句話，包含感謝他們的支持。約 50 字。`,
       });
-      setBabyDiary(response.text || '今天在裡面翻了一個筋斗，我是滿寶，大家都要想我喔！');
-    } catch (error) {
-      console.error("Failed to generate baby thoughts", error);
+      setBabyDiary(response.text || '今天在裡面翻了一個筋斗，大家都要想我喔！');
+    } catch (e) {
+      console.error(e);
     } finally {
       setIsGenerating(false);
     }
   };
 
-  useEffect(() => {
-    generateBabyThoughts();
-  }, []);
+  useEffect(() => { generateBabyThoughts(); }, []);
 
-  const handleSendMessage = (e: React.FormEvent) => {
+  const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMessage.trim() || !authorName.trim()) return;
-    const msg: Message = {
-      id: Date.now().toString(),
-      author: authorName,
-      content: newMessage,
-      timestamp: new Date(),
-    };
-    setMessages([msg, ...messages]);
-    setNewMessage('');
-    setAuthorName('');
+    if (!newMessage.trim() || !authorName.trim() || !db) return;
+    try {
+      await addDoc(collection(db, "blessings"), {
+        author: authorName,
+        content: newMessage,
+        timestamp: serverTimestamp(),
+      });
+      setNewMessage('');
+      setAuthorName('');
+    } catch (e) {
+      console.error("Send Message Error:", e);
+      alert('無法送出留言，請確認 Firestore 規則已設定為公開。');
+    }
   };
+
+  const scrollTo = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' });
 
   return (
     <div className="min-h-screen flex flex-col selection:bg-pink-100 selection:text-pink-600">
-      {/* 導覽列 */}
-      <nav className="sticky top-0 z-50 bg-white/90 backdrop-blur-md border-b border-pink-50 px-4 py-3">
-        <div className="max-w-6xl mx-auto flex justify-between items-center">
-          <div className="flex items-center gap-2 cursor-pointer" onClick={() => window.scrollTo({top: 0, behavior: 'smooth'})}>
-            <div className="bg-gradient-to-br from-pink-400 to-pink-500 p-2 rounded-xl shadow-sm">
-              <Baby className="text-white" size={22} />
-            </div>
-            <span className="text-xl font-bold tracking-tight text-gray-800">Man-Bao Project</span>
-          </div>
-          <div className="hidden md:flex gap-8 text-sm font-semibold text-gray-500">
-            <button onClick={() => scrollToSection('about')} className="hover:text-pink-500 transition-colors">關於滿寶</button>
-            <button onClick={() => scrollToSection('godparents')} className="hover:text-pink-500 transition-colors">應援計畫</button>
-            <button onClick={() => scrollToSection('wall')} className="hover:text-pink-500 transition-colors">祝福留言</button>
-          </div>
-          <button 
-            onClick={() => scrollToSection('godparents')}
-            className="bg-gray-900 text-white px-6 py-2.5 rounded-full text-sm font-bold hover:bg-gray-800 transition-all active:scale-95 shadow-md shadow-gray-200"
-          >
-            立即訂閱贊助
-          </button>
+      <nav className="fixed top-0 w-full z-50 bg-white/80 backdrop-blur-xl border-b border-pink-50/50 px-6 py-4 flex justify-between items-center transition-all">
+        <div className="flex items-center gap-2 cursor-pointer group" onClick={() => window.scrollTo({top:0, behavior:'smooth'})}>
+          <div className="bg-pink-500 p-2.5 rounded-2xl text-white shadow-lg shadow-pink-100 group-hover:rotate-12 transition-transform"><Baby size={22}/></div>
+          <span className="font-black text-gray-900 tracking-tighter text-2xl">Little ManBao</span>
         </div>
+        <div className="hidden md:flex gap-10 text-sm font-bold text-gray-400">
+          <button onClick={() => scrollTo('about')} className="hover:text-pink-500 transition-colors">關於滿寶</button>
+          <button onClick={() => scrollTo('tiers')} className="hover:text-pink-500 transition-colors">應援計畫</button>
+          <button onClick={() => scrollTo('wall')} className="hover:text-pink-500 transition-colors">祝福牆</button>
+        </div>
+        <button onClick={() => scrollTo('tiers')} className="bg-gray-900 text-white px-8 py-3 rounded-full text-xs font-black shadow-xl shadow-gray-100 hover:bg-black active:scale-95 transition-all">
+          成為守護者
+        </button>
       </nav>
 
-      <main className="flex-grow">
-        {/* Hero 區塊 */}
-        <section id="about" className="relative pt-12 pb-24 px-4 bg-gradient-to-b from-white via-pink-50/20 to-white overflow-hidden">
-          <div className="max-w-6xl mx-auto grid lg:grid-cols-2 gap-16 items-center">
-            <div className="space-y-8 relative z-10">
-              <div className="inline-flex items-center gap-2 bg-pink-100/80 border border-pink-200 text-pink-600 px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider">
-                <Stars size={14} className="animate-pulse" />
-                <span>預產期：2026 / 07 / 15</span>
-              </div>
-              <h1 className="text-6xl md:text-7xl font-black text-gray-900 leading-tight tracking-tighter">
-                Hello! <br />
-                我是 <span className="text-pink-500 inline-block hover:scale-105 transition-transform duration-300">滿寶</span>
-              </h1>
-              <p className="text-xl text-gray-600 leading-relaxed max-w-lg font-medium">
-                我正在努力長大，準備帶著滿滿的福氣來到這個世界。
-                你想成為滿寶的第一批守護者「乾爹」或「乾媽」嗎？
-                每一份支持都是滿寶未來最棒的見面禮！
-              </p>
-              <div className="flex flex-wrap gap-4 pt-4">
-                <button 
-                  onClick={() => scrollToSection('godparents')}
-                  className="flex items-center gap-2 bg-pink-500 text-white px-8 py-4 rounded-2xl font-bold hover:bg-pink-600 transition-all shadow-xl shadow-pink-100 active:scale-95"
-                >
-                  成為守護者 <ArrowRight size={20} />
-                </button>
-                <button 
-                  onClick={() => scrollToSection('wall')}
-                  className="flex items-center gap-2 bg-white border border-gray-200 px-8 py-4 rounded-2xl font-bold hover:bg-gray-50 transition-all active:scale-95"
-                >
-                  留下一句祝福
-                </button>
-              </div>
+      <main className="flex-grow pt-24">
+        {/* Hero Section */}
+        <section id="about" className="max-w-6xl mx-auto px-6 grid lg:grid-cols-2 gap-16 items-center py-20 overflow-hidden">
+          <div className="space-y-10">
+            <div className="inline-flex items-center gap-2 bg-pink-50 text-pink-500 px-5 py-2 rounded-full text-[10px] font-black tracking-[0.2em] uppercase border border-pink-100">
+              <Sparkles size={14} className="animate-pulse" />
+              <span>預產期 2026 / 07 / 15</span>
             </div>
-
-            <div className="relative">
-              <div className="absolute -top-12 -right-12 w-64 h-64 bg-pink-200 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-blob"></div>
-              <div className="absolute -bottom-8 -left-8 w-64 h-64 bg-blue-200 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-blob animation-delay-2000"></div>
-              
-              <div className="relative bg-white p-5 rounded-[2.5rem] shadow-[0_20px_50px_rgba(0,0,0,0.1)] border border-pink-50 transform lg:rotate-2 hover:rotate-0 transition-all duration-700">
-                <img 
-                  src="./product_1.jpg" 
-                  alt="滿寶第一張超音波照片"
-                  className="rounded-[1.5rem] w-full h-auto object-cover aspect-[4/3] shadow-inner grayscale contrast-125 hover:grayscale-0 transition-all duration-700"
-                />
-                <div className="mt-6 flex justify-between items-center px-2">
-                  <div className="flex flex-col">
-                    <span className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Growth Status</span>
-                    <div className="flex items-center gap-2 text-gray-700">
-                      <Calendar size={18} className="text-pink-400" />
-                      <span className="text-sm font-bold italic underline decoration-pink-200 underline-offset-4">目前孕期：{pregnancyStatus.label}</span>
-                    </div>
-                  </div>
-                  <div className="bg-pink-50 px-4 py-2 rounded-2xl flex items-center gap-2">
-                    <Heart size={16} className="text-pink-500 animate-bounce" fill="currentColor" />
-                    <span className="text-pink-600 font-black text-sm">Growing!</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* 滿寶的心情獨白 */}
-        <section className="py-20 px-4 bg-white">
-          <div className="max-w-4xl mx-auto">
-            <div className="bg-white p-1 md:p-1.5 rounded-[3.5rem] shadow-2xl bg-gradient-to-br from-pink-200 via-white to-blue-200">
-              <div className="bg-white p-8 md:p-16 rounded-[3rem] text-center relative overflow-hidden">
-                <div className="absolute top-0 right-0 p-8 opacity-5">
-                   <Baby size={120} />
-                </div>
-                <h2 className="text-sm font-black text-pink-500 uppercase tracking-widest mb-6">Man-Bao's Current Stage</h2>
-                <div className="min-h-[140px] flex items-center justify-center">
-                   <p className="text-2xl md:text-3xl font-bold text-gray-800 leading-relaxed italic">
-                    「{babyDiary}」
-                  </p>
-                </div>
-                <div className="mt-10">
-                  <button 
-                    onClick={generateBabyThoughts}
-                    disabled={isGenerating}
-                    className="group inline-flex items-center gap-2 text-sm font-bold text-gray-400 hover:text-pink-500 transition-colors disabled:opacity-50"
-                  >
-                    <div className={`p-2 rounded-full border border-gray-100 group-hover:border-pink-200 group-hover:bg-pink-50 transition-all ${isGenerating ? 'animate-spin' : ''}`}>
-                      <Stars size={16} />
-                    </div>
-                    {isGenerating ? '正在與滿寶連線中...' : '再點一次，聽聽滿寶的心底話'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* 應援方案區 */}
-        <section id="godparents" className="py-24 px-4 bg-gray-50/50 scroll-mt-20">
-          <div className="max-w-6xl mx-auto text-center mb-20">
-            <h2 className="text-4xl md:text-5xl font-black text-gray-900 mb-6">乾爹乾媽 應援方案</h2>
-            <p className="text-gray-500 max-w-2xl mx-auto text-lg font-medium">
-              您的每一份支持，都將專款專用於滿寶的成長與教育基金。<br className="hidden md:block" />
-              點擊下方按鈕將前往 PayPal 安全訂閱頁面。
+            <h1 className="text-7xl md:text-8xl font-black tracking-tighter text-gray-900 leading-[0.85]">
+              Hello World!<br/><span className="text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-rose-400">我是滿寶</span>
+            </h1>
+            <p className="text-2xl text-gray-500 font-medium leading-relaxed max-w-md">
+              目前在媽咪肚子裡待了 <span className="text-pink-500 font-black">{pregnancyStatus.label}</span>。<br/>
+              正在努力變壯，準備跟各位乾爹乾媽見面！
             </p>
+            <div className="flex flex-wrap gap-5 pt-4">
+              <button onClick={() => scrollTo('tiers')} className="group bg-pink-500 text-white px-10 py-5 rounded-3xl font-black shadow-2xl shadow-pink-200 flex items-center gap-3 hover:bg-pink-600 active:scale-95 transition-all">
+                支持我的奶粉錢 <ArrowRight size={20} className="group-hover:translate-x-1 transition-transform"/>
+              </button>
+            </div>
           </div>
 
-          <div className="max-w-6xl mx-auto grid md:grid-cols-3 gap-10">
-            {SUBSCRIPTION_TIERS.map((tier) => (
-              <div key={tier.id} className="group bg-white rounded-[2.5rem] p-10 shadow-xl border border-gray-100 flex flex-col hover:-translate-y-2 transition-all duration-500">
-                <div className={`self-start px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest mb-6 ${tier.color}`}>
-                  {tier.name}方案
+          <div className="relative group">
+            <div className="absolute -inset-10 bg-gradient-to-tr from-pink-100 to-rose-100 rounded-[5rem] blur-3xl opacity-30 group-hover:opacity-50 transition-all duration-1000"></div>
+            <div className="relative bg-white p-5 rounded-[3rem] shadow-[0_40px_80px_-15px_rgba(0,0,0,0.1)] border border-white transform lg:-rotate-1 group-hover:rotate-0 transition-all duration-1000">
+              <div className="aspect-[4/3] rounded-[2.5rem] overflow-hidden bg-gray-50 relative">
+                {!imgError ? (
+                  <img 
+                    src="./product_1.jpg" 
+                    alt="滿寶第一張照片" 
+                    onError={() => setImgError(true)}
+                    className="w-full h-full object-cover grayscale contrast-125 transition-all duration-1000 group-hover:grayscale-0 group-hover:scale-105"
+                  />
+                ) : (
+                  <div className="w-full h-full bg-gradient-to-br from-pink-50 to-rose-100 flex flex-col items-center justify-center text-pink-300 p-12 text-center">
+                    <Baby size={80} className="mb-6 animate-float opacity-50"/>
+                    <p className="font-black text-xs uppercase tracking-widest leading-loose">滿寶的首張寫真<br/>拍攝中...</p>
+                  </div>
+                )}
+                <div className="absolute top-6 left-6 bg-white/90 backdrop-blur px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest text-pink-500 shadow-sm">Growth Step</div>
+              </div>
+              <div className="mt-8 flex justify-between items-end px-4">
+                <div className="space-y-2">
+                  <div className="text-[10px] text-gray-300 font-black uppercase tracking-widest">Growth Progress</div>
+                  <div className="flex items-center gap-3 text-gray-800">
+                    <div className="p-2 bg-pink-50 rounded-xl"><Calendar size={20} className="text-pink-500" /></div>
+                    <span className="text-xl font-black">{pregnancyStatus.label}</span>
+                  </div>
                 </div>
-                <div className="flex items-baseline gap-1 mb-2">
-                  <span className="text-5xl font-black text-gray-900">NT${tier.price}</span>
-                  <span className="text-gray-400 font-bold">/月</span>
+                <div className="bg-pink-500 h-10 w-10 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-pink-100">
+                  <Heart size={20} fill="currentColor" />
                 </div>
-                <p className="text-gray-600 font-bold mb-8">{tier.description}</p>
-                
-                <div className="space-y-5 mb-10 flex-grow pt-8 border-t border-gray-50">
-                  {tier.perks.map((perk, i) => (
-                    <div key={i} className="flex items-start gap-3">
-                      <div className="mt-1 bg-green-50 p-0.5 rounded-full">
-                        <CheckCircle2 className="text-green-500" size={16} />
-                      </div>
-                      <span className="text-sm text-gray-700 font-medium leading-tight">{perk}</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Baby Secret Voice Section */}
+        <section className="py-32 bg-white">
+          <div className="max-w-4xl mx-auto px-6">
+            <div className="bg-white p-12 md:p-24 rounded-[4rem] shadow-[0_50px_100px_-20px_rgba(0,0,0,0.05)] border border-pink-50/50 text-center relative overflow-hidden">
+              <h2 className="text-[10px] font-black text-pink-300 tracking-[0.5em] uppercase mb-12">Man-Bao's Secret Voice</h2>
+              <div className="min-h-[140px] flex items-center justify-center">
+                <p className="text-3xl md:text-4xl font-bold text-gray-800 italic leading-snug tracking-tight px-4">「{babyDiary}」</p>
+              </div>
+              <div className="mt-16">
+                <button 
+                  onClick={generateBabyThoughts} 
+                  disabled={isGenerating}
+                  className="inline-flex items-center gap-3 px-10 py-4 rounded-full bg-gray-50 text-gray-400 font-black text-xs hover:bg-pink-50 hover:text-pink-500 transition-all disabled:opacity-50 group"
+                >
+                  <Stars size={16} className={isGenerating ? 'animate-spin' : 'group-hover:rotate-12 transition-transform'} />
+                  {isGenerating ? '正在穿越羊水中...' : '再聽聽滿寶別的話'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Tiers Section */}
+        <section id="tiers" className="py-32 bg-[#fffafa]">
+          <div className="max-w-6xl mx-auto px-6 text-center mb-24">
+            <h2 className="text-5xl font-black text-gray-900 tracking-tighter mb-4">乾爹乾媽應援方案</h2>
+            <p className="text-gray-400 font-bold uppercase text-xs tracking-[0.4em]">Become his guardian from day zero</p>
+          </div>
+          <div className="max-w-6xl mx-auto px-6 grid md:grid-cols-3 gap-10">
+            {SUBSCRIPTION_TIERS.map(tier => (
+              <div key={tier.id} className="group bg-white p-12 rounded-[3.5rem] shadow-[0_20px_60px_rgba(0,0,0,0.02)] border border-gray-100/50 flex flex-col hover:-translate-y-4 transition-all duration-500">
+                <div className={`self-start px-4 py-1.5 rounded-full text-[10px] font-black mb-10 uppercase tracking-widest ${tier.color}`}>{tier.name}</div>
+                <div className="mb-8">
+                  <span className="text-6xl font-black text-gray-900 tracking-tighter">NT${tier.price}</span>
+                  <span className="text-gray-300 text-sm font-bold ml-1">/ mo</span>
+                </div>
+                <p className="text-gray-500 font-medium mb-12 leading-relaxed text-lg">{tier.description}</p>
+                <div className="space-y-5 mb-14 flex-grow border-t border-gray-50 pt-10">
+                  {tier.perks.map((p, i) => (
+                    <div key={i} className="flex gap-4 text-sm font-bold text-gray-600 leading-snug">
+                      <div className="bg-green-50 p-1 rounded-full shrink-0"><CheckCircle2 className="text-green-500" size={16}/></div>
+                      <span>{p}</span>
                     </div>
                   ))}
                 </div>
-
-                <a 
-                  href={getPaypalLink(tier.id)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full py-5 bg-blue-600 text-white rounded-2xl font-black hover:bg-blue-700 transition-all shadow-lg shadow-blue-100 flex items-center justify-center gap-3 active:scale-95"
-                >
-                  PayPal 安全訂閱 <ExternalLink size={18} />
-                </a>
-                <div className="flex items-center justify-center gap-1.5 mt-4 opacity-40">
-                   <ShieldCheck size={14} />
-                   <span className="text-[10px] font-bold uppercase tracking-widest">Secure Payment</span>
-                </div>
+                <button className="w-full py-5 bg-blue-600 text-white rounded-[2rem] font-black shadow-2xl shadow-blue-100 hover:bg-blue-700 transition-all flex items-center justify-center gap-3 active:scale-95 group-hover:scale-[1.02]">
+                  PayPal 訂閱支持 <ExternalLink size={18}/>
+                </button>
               </div>
             ))}
           </div>
         </section>
 
-        {/* 祝福牆區 */}
-        <section id="wall" className="py-24 px-4 bg-white scroll-mt-20">
-          <div className="max-w-6xl mx-auto">
-            <div className="flex flex-col lg:flex-row gap-20">
-              <div className="lg:w-1/3 space-y-8">
-                <div>
-                  <h2 className="text-4xl font-black text-gray-900 mb-4">祝福滿寶</h2>
-                  <p className="text-gray-500 font-medium leading-relaxed">
-                    留言將會儲存下來，等滿寶出生長大後，我們會親自讀給他聽喔！
+        {/* Blessing Wall Section */}
+        <section id="wall" className="py-40 px-6 max-w-7xl mx-auto grid lg:grid-cols-2 gap-24">
+          <div className="space-y-12">
+            <div className="space-y-6">
+              <h2 className="text-6xl font-black text-gray-900 tracking-tighter leading-tight">祝福留言牆</h2>
+              <p className="text-gray-500 font-medium text-xl max-w-sm leading-relaxed">每一句對滿寶的祝福，都會成為他成長的力量。</p>
+            </div>
+            
+            <form onSubmit={handleSendMessage} className="bg-white p-12 rounded-[4rem] shadow-[0_40px_80px_-20px_rgba(0,0,0,0.08)] border border-gray-50 space-y-8">
+              <div className="space-y-3">
+                <label className="text-[10px] font-black text-gray-300 uppercase tracking-[0.3em] ml-2">您的暱稱</label>
+                <input 
+                  type="text" 
+                  required
+                  value={authorName} 
+                  onChange={e => setAuthorName(e.target.value)} 
+                  className="w-full px-8 py-5 bg-gray-50 rounded-3xl font-bold focus:ring-2 focus:ring-pink-200 outline-none transition-all placeholder:text-gray-200 text-lg" 
+                  placeholder="乾爹 / 乾媽的名字"
+                />
+              </div>
+              <div className="space-y-3">
+                <label className="text-[10px] font-black text-gray-300 uppercase tracking-[0.3em] ml-2">祝福悄悄話</label>
+                <textarea 
+                  rows={4} 
+                  required
+                  value={newMessage} 
+                  onChange={e => setNewMessage(e.target.value)} 
+                  className="w-full px-8 py-5 bg-gray-50 rounded-3xl font-medium focus:ring-2 focus:ring-pink-200 outline-none resize-none transition-all placeholder:text-gray-200 text-lg" 
+                  placeholder="寫下您想對滿寶說的話..."
+                />
+              </div>
+              <button className="w-full bg-gray-900 text-white py-6 rounded-[2rem] font-black flex items-center justify-center gap-3 active:scale-95 transition-all hover:bg-black shadow-2xl shadow-gray-200 text-lg">
+                <Send size={22}/> 送出愛的祝福
+              </button>
+            </form>
+          </div>
+
+          <div className="relative">
+            <div className="absolute top-0 inset-x-0 h-24 bg-gradient-to-b from-[#fffcfc] to-transparent z-10 pointer-events-none"></div>
+            <div className="space-y-8 max-h-[850px] overflow-y-auto pr-6 scrollbar-hide py-12">
+              {firestoreError ? (
+                <div className="bg-red-50 p-10 rounded-[3rem] border border-red-100 text-center space-y-4">
+                  <div className="bg-white w-14 h-14 rounded-2xl flex items-center justify-center mx-auto text-red-500 shadow-sm">
+                    <AlertCircle size={30} />
+                  </div>
+                  <h3 className="font-black text-red-900">載入失敗</h3>
+                  <p className="text-red-700/70 text-sm font-medium leading-relaxed">
+                    Firestore 連線不穩定或服務尚未就緒。
                   </p>
                 </div>
-
-                <form onSubmit={handleSendMessage} className="bg-pink-50 p-8 rounded-[2.5rem] border border-pink-100 space-y-5 shadow-inner">
-                  <div className="space-y-2">
-                    <label className="text-xs font-black text-pink-600 uppercase tracking-widest ml-1">暱稱 (乾爹/乾媽)</label>
-                    <input 
-                      type="text" 
-                      value={authorName}
-                      onChange={(e) => setAuthorName(e.target.value)}
-                      placeholder="您的稱呼"
-                      className="w-full px-5 py-4 bg-white rounded-2xl border-none shadow-sm focus:ring-2 focus:ring-pink-300 transition-all font-bold placeholder:text-gray-300"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-black text-pink-600 uppercase tracking-widest ml-1">給滿寶的訊息</label>
-                    <textarea 
-                      rows={4}
-                      value={newMessage}
-                      onChange={(e) => setNewMessage(e.target.value)}
-                      placeholder="寫下您的祝福..."
-                      className="w-full px-5 py-4 bg-white rounded-2xl border-none shadow-sm focus:ring-2 focus:ring-pink-300 transition-all resize-none font-medium placeholder:text-gray-300"
-                    ></textarea>
-                  </div>
-                  <button type="submit" className="w-full bg-pink-500 text-white py-4 rounded-2xl font-black hover:bg-pink-600 transition-all shadow-lg shadow-pink-100 active:scale-95">
-                    送出祝福牆
-                  </button>
-                </form>
-              </div>
-
-              <div className="lg:w-2/3">
-                <div className="grid sm:grid-cols-2 gap-6">
-                  {messages.length > 0 ? messages.map((msg) => (
-                    <div key={msg.id} className="group bg-white p-7 rounded-3xl shadow-md border border-gray-100 hover:border-pink-100 transition-all duration-300">
-                      <div className="flex items-center gap-4 mb-4">
-                        <div className="w-12 h-12 bg-pink-100 rounded-2xl flex items-center justify-center group-hover:scale-110 transition-transform">
-                          <MessageCircle size={22} className="text-pink-500" />
-                        </div>
-                        <div>
-                          <div className="font-black text-gray-900">{msg.author}</div>
-                          <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">{msg.timestamp.toLocaleDateString()}</div>
-                        </div>
-                      </div>
-                      <p className="text-gray-600 leading-relaxed font-medium">
-                        {msg.content}
-                      </p>
-                    </div>
-                  )) : (
-                    <div className="col-span-2 text-center py-20 bg-gray-50 rounded-[2rem] border-2 border-dashed border-gray-200">
-                       <p className="text-gray-400 font-bold">還沒有人留言，來當滿寶的第一個乾爹乾媽吧！</p>
-                    </div>
-                  )}
+              ) : isLoadingMessages ? (
+                <div className="flex flex-col items-center justify-center py-20 text-gray-300 space-y-4">
+                  <Loader2 size={40} className="animate-spin opacity-50" />
+                  <p className="font-black text-sm uppercase tracking-widest">祝福載入中...</p>
                 </div>
-              </div>
+              ) : messages.length > 0 ? messages.map(msg => (
+                <div key={msg.id} className="bg-white p-10 rounded-[3rem] border border-gray-50 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 group">
+                  <div className="flex items-center gap-5 mb-6">
+                    <div className="w-14 h-14 bg-pink-50 rounded-2xl flex items-center justify-center text-pink-400 group-hover:scale-110 transition-transform"><MessageCircle size={28}/></div>
+                    <div>
+                      <div className="font-black text-gray-900 text-xl">{msg.author}</div>
+                      <div className="text-[10px] text-gray-300 font-black tracking-widest uppercase mt-0.5">
+                        {msg.timestamp?.toDate ? msg.timestamp.toDate().toLocaleDateString() : '剛剛發佈'}
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-gray-600 font-medium leading-relaxed italic text-xl px-2">「{msg.content}」</p>
+                </div>
+              )) : (
+                <div className="h-full flex flex-col items-center justify-center border-4 border-dashed border-gray-50 rounded-[4rem] p-24 text-gray-200 text-center space-y-6">
+                  <Baby size={80} className="opacity-10 animate-float"/>
+                  <div className="space-y-2">
+                    <p className="font-black text-xl tracking-tight text-gray-300">目前還沒有留言</p>
+                    <p className="text-sm font-bold opacity-50">成為第一個祝福滿寶的人吧！</p>
+                  </div>
+                </div>
+              )}
             </div>
+            <div className="absolute bottom-0 inset-x-0 h-24 bg-gradient-to-t from-[#fffcfc] to-transparent z-10 pointer-events-none"></div>
           </div>
         </section>
       </main>
 
-      <footer className="bg-gray-900 text-white pt-20 pb-10 px-4 mt-20">
-        <div className="max-w-6xl mx-auto flex flex-col items-center">
-          <div className="flex items-center gap-3 mb-8">
-            <div className="bg-white/10 p-3 rounded-2xl">
-              <Baby size={30} className="text-pink-400" />
+      <footer className="bg-gray-900 text-white py-32 px-6 mt-20 relative overflow-hidden">
+        <div className="max-w-6xl mx-auto text-center space-y-16 relative z-10">
+          <div className="flex flex-col items-center gap-6 group cursor-pointer" onClick={() => window.scrollTo({top:0, behavior:'smooth'})}>
+            <div className="bg-pink-500/10 p-5 rounded-[2rem] border border-pink-500/20 group-hover:scale-110 transition-all duration-500">
+              <Baby size={54} className="text-pink-400"/>
             </div>
-            <span className="text-3xl font-black tracking-tighter">Man-Bao Project</span>
+            <span className="text-4xl font-black tracking-tighter uppercase italic tracking-[0.2em]">Little Blessing</span>
           </div>
-          
-          <div className="flex gap-10 text-sm font-bold text-gray-400 mb-12">
-            <button onClick={() => scrollToSection('about')} className="hover:text-white transition-colors">關於</button>
-            <button onClick={() => scrollToSection('godparents')} className="hover:text-white transition-colors">應援</button>
-            <button onClick={() => scrollToSection('wall')} className="hover:text-white transition-colors">留言牆</button>
-          </div>
-
-          <div className="text-center space-y-4">
-            <p className="text-gray-500 text-sm font-medium max-w-md mx-auto leading-relaxed">
-              本網站所有贊助款項將 100% 用於滿寶的教育與成長所需。
-              感謝每一位願意陪伴他長大的守護者。
-            </p>
-            <div className="pt-10 border-t border-white/5 w-full">
-              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-gray-600 text-center">
-                © {new Date().getFullYear()} Man-Bao Blessing Project. All rights reserved.
-              </p>
-            </div>
+          <p className="text-gray-500 font-bold max-w-xl mx-auto leading-relaxed text-lg">
+            每一份訂閱都是對生命的祝福。所有款項將全數用於滿寶的成長與教育。感謝您參與這段美好的旅程。
+          </p>
+          <div className="pt-20 border-t border-white/5 text-[10px] text-gray-700 font-black tracking-[0.6em] uppercase">
+            © {new Date().getFullYear()} ManBao Growth Project . All Rights Reserved
           </div>
         </div>
       </footer>
